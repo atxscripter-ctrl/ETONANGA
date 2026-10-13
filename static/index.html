@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ML Checker</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#0b0d10; color:#e6e8eb; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .glow { box-shadow: 0 0 0 1px #1f2937, 0 8px 40px -10px rgba(80,140,255,0.25); }
+  .log-line { padding: 2px 0; border-bottom: 1px dashed #1a1f27; white-space: pre-wrap; word-break: break-word; }
+  .lbl-valid { color:#34d399; } .lbl-invalid { color:#f87171; }
+  .lbl-error { color:#fbbf24; } .lbl-info { color:#60a5fa; }
+  .lbl-timeout { color:#a78bfa; }
+  .bar { background: linear-gradient(90deg,#3b82f6,#8b5cf6); }
+  .conn-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+</style>
+</head>
+<body class="min-h-screen">
+<main class="max-w-5xl mx-auto p-6">
+  <header class="mb-6 flex items-center justify-between">
+    <h1 class="text-2xl tracking-wider">ML // checker</h1>
+    <span id="statusPill" class="text-xs px-3 py-1 rounded-full bg-slate-800">
+      <span id="connDot" class="conn-dot bg-slate-500"></span><span id="statusText">idle</span>
+    </span>
+  </header>
+
+  <section class="glow rounded-xl bg-[#0f1218] p-5 mb-5">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <label class="text-xs text-slate-400">combolist (user:pass per line)</label>
+        <input id="fileCombo" type="file" class="mt-1 w-full text-sm" />
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">devices file (optional)</label>
+        <input id="fileDevices" type="file" class="mt-1 w-full text-sm" />
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">telegram token (optional)</label>
+        <input id="tgToken" class="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm" />
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">telegram chat id (optional)</label>
+        <input id="tgChat" class="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm" />
+      </div>
+    </div>
+    <div class="mt-4 flex flex-wrap gap-3">
+      <button id="btnStart" class="px-4 py-2 rounded bg-blue-600 hover:bg-blue-500 text-sm">start</button>
+      <button id="btnStop" class="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-sm" disabled>stop</button>
+      <button id="btnCopy" class="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-sm">copy valid</button>
+      <button id="btnDl" class="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-sm">download</button>
+    </div>
+  </section>
+
+  <section class="glow rounded-xl bg-[#0f1218] p-5 mb-5">
+    <div class="flex justify-between text-xs mb-2">
+      <span id="progressText">0 / 0</span>
+      <span id="counters">valid 0 · invalid 0 · errors 0</span>
+    </div>
+    <div class="h-2 w-full bg-slate-800 rounded overflow-hidden">
+      <div id="bar" class="bar h-full w-0 transition-all" style="width:0%"></div>
+    </div>
+  </section>
+
+  <section class="glow rounded-xl bg-[#0f1218] p-5">
+    <div class="text-xs text-slate-400 mb-2">live log</div>
+    <div id="log" class="text-xs h-[420px] overflow-auto"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null, jobId = null;
+let validLines = [];
+let snapshot = { valid:0, invalid:0, errors:0, total:0, current_index:0, status:"idle" };
+
+function setConn(state) {
+  const dot = $('connDot');
+  const map = { idle:"bg-slate-500", connecting:"bg-yellow-500", live:"bg-emerald-500", done:"bg-blue-500", error:"bg-red-500" };
+  dot.className = "conn-dot " + (map[state] || "bg-slate-500");
+}
+function setStatus(s) { $('statusText').textContent = s; setConn(s === 'running' ? 'live' : (s === 'done' ? 'done' : (s === 'error' ? 'error' : 'idle'))); }
+
+function appendLog(entry) {
+  const t = new Date(entry.t * 1000).toLocaleTimeString();
+  let cls = 'text-slate-300', text = '';
+  if (entry.kind === 'progress') {
+    text = `[${entry.index}/${entry.total}] ${entry.user}`;
+  } else if (entry.kind === 'result') {
+    cls = 'lbl-' + (entry.label || '').toLowerCase();
+    text = `  ${entry.label} ${entry.user}${entry.status ? '  ' + entry.status : ''}${entry.msg ? '  ' + entry.msg : ''}`;
+  } else if (entry.kind === 'info') {
+    cls = 'lbl-info';
+    text = `  INFO ${entry.user}\n    ${entry.line}`;
+  } else if (entry.kind === 'info_error') {
+    cls = 'lbl-error';
+    text = `  INFO-ERR ${entry.user}: ${entry.msg}`;
+  } else if (entry.kind === 'status') {
+    cls = 'text-emerald-400';
+    text = `== ${entry.status} ==${entry.msg ? ' ' + entry.msg : ''}`;
+  } else if (entry.kind === 'ping' || entry.kind === 'snapshot') {
+    return;
+  } else {
+    text = JSON.stringify(entry);
+  }
+  const div = document.createElement('div');
+  div.className = 'log-line ' + cls;
+  div.textContent = `${t}  ${text}`;
+  const log = $('log');
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  if (log.childNodes.length > 3000) {
+    for (let i = 0; i < 500; i++) log.removeChild(log.firstChild);
+  }
+}
+
+function updateProgress(snap) {
+  const total = snap.total || 0, cur = snap.current_index || 0;
+  $('progressText').textContent = `${cur} / ${total}`;
+  $('counters').textContent = `valid ${snap.valid} · invalid ${snap.invalid} · errors ${snap.errors}`;
+  const pct = total ? Math.min(100, (cur / total * 100)) : 0;
+  $('bar').style.width = pct + '%';
+  if (snap.status) setStatus(snap.status);
+}
+
+async function start() {
+  const f = $('fileCombo').files[0];
+  if (!f) return alert('pick combolist');
+  const fd = new FormData();
+  fd.append('combolist', f);
+  if ($('fileDevices').files[0]) fd.append('devices', $('fileDevices').files[0]);
+  fd.append('telegram_token', $('tgToken').value.trim());
+  fd.append('telegram_chat', $('tgChat').value.trim());
+
+  setConn('connecting');
+  let r;
+  try {
+    r = await fetch('/api/jobs', { method: 'POST', body: fd });
+  } catch (e) {
+    alert('network error: ' + e);
+    setConn('idle');
+    return;
+  }
+  if (!r.ok) {
+    alert('failed: ' + (await r.text()));
+    setConn('idle');
+    return;
+  }
+  const { id } = await r.json();
+  jobId = id;
+  validLines = [];
+  $('log').innerHTML = '';
+  $('btnStart').disabled = true;
+  $('btnStop').disabled = false;
+  openWs(id);
+}
+
+function openWs(id) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws/${id}`);
+  setConn('connecting');
+  ws.onopen = () => setConn('live');
+  ws.onmessage = (e) => {
+    let entry;
+    try { entry = JSON.parse(e.data); } catch (_) { return; }
+    if (entry.kind === 'snapshot') {
+      snapshot = { ...snapshot, ...entry };
+      updateProgress(entry);
+      (entry.log_tail || []).forEach(appendLog);
+      return;
+    }
+    if (entry.kind === 'ping') return;
+    if (['progress','result','status'].includes(entry.kind)) refreshSnapshot();
+    if (entry.kind === 'result' && entry.label === 'VALID') validLines.push(entry.user);
+    appendLog(entry);
+    if (entry.kind === 'status' && ['done','stopped','error'].includes(entry.status)) {
+      $('btnStart').disabled = false;
+      $('btnStop').disabled = true;
+      if (ws) ws.close();
+      refreshSnapshot();
+    }
+  };
+  ws.onclose = () => {
+    setConn('done');
+    $('btnStart').disabled = false;
+    $('btnStop').disabled = true;
+  };
+  ws.onerror = () => setConn('error');
+}
+
+async function refreshSnapshot() {
+  if (!jobId) return;
+  try {
+    const r = await fetch('/api/jobs/' + jobId);
+    if (r.ok) {
+      snapshot = await r.json();
+      updateProgress(snapshot);
+    }
+  } catch (_) {}
+}
+
+$('btnStart').onclick = start;
+$('btnStop').onclick = async () => {
+  if (!jobId) return;
+  try { await fetch(`/api/jobs/${jobId}/stop`, { method: 'POST' }); } catch (_) {}
+};
+$('btnCopy').onclick = () => {
+  navigator.clipboard.writeText(validLines.join('\n'));
+  const b = $('btnCopy');
+  b.textContent = 'copied';
+  setTimeout(() => b.textContent = 'copy valid', 1200);
+};
+$('btnDl').onclick = async () => {
+  if (!jobId) return;
+  try {
+    const r = await fetch(`/api/jobs/${jobId}/export`);
+    const j = await r.json();
+    const blob = new Blob([j.content], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `valid_${jobId}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (_) {}
+};
+</script>
+</body>
+</html>
