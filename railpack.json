@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "python",
+  "packages": {
+    "python": "3.12"
+  },
+  "steps": {
+    "install": {
+      "commands": [
+        "pip install --upgrade pip wheel setuptools",
+        "pip install fastapi==0.115.0 uvicorn[standard]==0.30.6 playwright==1.47.0 pycryptodome==3.20.0 zstandard==0.23.0 python-multipart==0.0.9 websockets==13.0"
+      ]
+    }
+  },
+  "deploy": {
+    "startCommand": "sh start.sh"
+  },
+  "variables": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "RAILPACK_PYTHON_PLAYWRIGHT_INSTALL": "1",
+    "PLAYWRIGHT_BROWSERS_PATH": "/app/.playwright",
+    "ML_OUT_DIR": "/app/data"
+  }
+}
