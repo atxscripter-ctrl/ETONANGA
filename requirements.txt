@@ -1,0 +1,7 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+playwright==1.47.0
+pycryptodome==3.20.0
+zstandard==0.23.0
+python-multipart==0.0.9
+websockets==13.0
